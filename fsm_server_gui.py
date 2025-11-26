@@ -50,6 +50,24 @@ class ServerGUI:
         self.stop_btn = tk.Button(top, text='Detener Servidor', command=self.stop_server, state='disabled')
         self.stop_btn.grid(row=0, column=5)
 
+        # Ship placement controls
+        place_frame = tk.Frame(root)
+        place_frame.pack(padx=10, pady=(4,6), anchor='w')
+
+        tk.Label(place_frame, text='Barco:').grid(row=0, column=0)
+        self.selected_ship_var = tk.StringVar(value='D')
+        ship_menu = tk.OptionMenu(place_frame, self.selected_ship_var, 'D', 'SS', 'LLL')
+        ship_menu.config(width=5)
+        ship_menu.grid(row=0, column=1, padx=(4,8))
+
+        tk.Label(place_frame, text='Orientación:').grid(row=0, column=2)
+        self.orientation_var = tk.StringVar(value='H')
+        orient_menu = tk.OptionMenu(place_frame, self.orientation_var, 'H', 'V')
+        orient_menu.config(width=3)
+        orient_menu.grid(row=0, column=3, padx=(4,8))
+
+        tk.Button(place_frame, text='Limpiar flota', command=self.clear_fleet).grid(row=0, column=4, padx=(6,0))
+
         # Status
         self.status_var = tk.StringVar(value='Estado: detenido')
         tk.Label(root, textvariable=self.status_var).pack(anchor='w', padx=10)
@@ -79,47 +97,133 @@ class ServerGUI:
                 btn.grid(row=i, column=j, padx=2, pady=2)
                 self.buttons[pos] = btn
 
+        # Después de construir botones, sincronizar con el tablero del servidor
+        self.refresh_board()
+
         # Info / legend
         legend = tk.Frame(root)
         legend.pack(padx=10, pady=(0,8), anchor='w')
-        tk.Label(legend, text='Leyenda: D = Destroyer (visible en servidor), ~ = agua, X = impacto, O = fallo').pack()
+        tk.Label(legend, text='Leyenda: D = Destroyer, SS = Submarino (2), LLL = Acorazado (3), ~ = agua, X = impacto, O = fallo').pack(side='left')
+        tk.Button(legend, text='Refrescar flota', command=self.refresh_board).pack(side='left', padx=(8,0))
 
         # Bind close
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
 
     def toggle_cell(self, pos):
         """Colocar el Destroyer en la celda seleccionada (solo 1 permitido)."""
-        # Si ya hay colocado en servidor, quitarlo visualmente
-        # Nuestra NavalServerFSM solo soporta un Destroyer y la función colocar_flota coloca y setea estado.
-        # Para simplicidad, si ya colocamos, preguntamos si desea mover.
-        if any(self.buttons[p]['text'] == 'D' for p in self.buttons):
-            current = next(p for p in self.buttons if self.buttons[p]['text'] == 'D')
+        ship_choice = self.selected_ship_var.get()
+        orient = self.orientation_var.get()
+
+        # Map GUI choice to internal type
+        tipo_map = {'D': 'D', 'SS': 'S', 'LLL': 'L'}
+        tipo = tipo_map.get(ship_choice, 'D')
+
+        # If placing single-cell Destroyer
+        if tipo == 'D':
+            servidor_tab = self.servidor.tablero
+            current = next((p for p, v in servidor_tab.items() if v == 'D'), None)
+
             if current == pos:
-                # Desea quitar
                 if messagebox.askyesno('Quitar', f'Quitar Destroyer de {pos}?'):
-                    # No hay método para quitar en la clase original; recreamos la instancia de servidor para resetear.
+                    # For simplicity recreate server instance as before
                     self.servidor = NavalServerFSM()
-                    # Reset textos
-                    for b in self.buttons.values():
-                        b.config(text='~')
+                    self.refresh_board()
                     self.status_var.set('Estado: flota removida')
                 return
-            else:
+
+            if current and current != pos:
                 if not messagebox.askyesno('Mover', f'Mover Destroyer de {current} a {pos}?'):
                     return
-                # Reset previous visual
-                self.buttons[current].config(text='~')
 
-        # Intentar colocar en servidor
-        ok = self.servidor.colocar_flota(pos)
+            # No permitir sobre otros barcos
+            if self.servidor.tablero.get(pos) in ('S', 'L'):
+                messagebox.showerror('Error', f'No se puede colocar Destroyer sobre otro barco en {pos}.')
+                return
+
+            ok = self.servidor.colocar_flota(pos)
+            if ok:
+                self.refresh_board()
+                self.status_var.set(f'Destroyer colocado en {pos}')
+            else:
+                messagebox.showerror('Error', f'No se pudo colocar Destroyer en {pos}.')
+            return
+
+        # Para barcos multi-celda (SS -> longitud 2, L -> longitud 3)
+        length = 2 if tipo == 'S' else 3
+
+        # Calcular posiciones a partir de pos y orientación
+        row = pos[0]
+        col = int(pos[1])
+        rows = ['A', 'B', 'C', 'D', 'E']
+
+        positions = []
+        try:
+            if orient == 'H':
+                # Avanzar columnas
+                for offset in range(length):
+                    c = col + offset
+                    positions.append(f"{row}{c}")
+            else:
+                # Vertical: avanzar filas
+                start_idx = rows.index(row)
+                for offset in range(length):
+                    r = rows[start_idx + offset]
+                    positions.append(f"{r}{col}")
+        except Exception:
+            messagebox.showerror('Error', 'Colocación fuera del tablero')
+            return
+
+        # Validar solapamientos y existencia
+        for p in positions:
+            if p not in self.buttons:
+                messagebox.showerror('Error', f'Posición inválida {p} en la colocación')
+                return
+            if self.servidor.tablero.get(p) is not None:
+                messagebox.showerror('Error', f'Celda {p} ya ocupada')
+                return
+
+        # Evitar múltiples instancias del mismo tipo
+        if self.servidor.ships.get(tipo):
+            if not messagebox.askyesno('Reemplazar', f'Ya existe un {ship_choice}. ¿Reemplazarlo?'):
+                return
+            # Quitar existente del mismo tipo
+            for p in list(self.servidor.ships.get(tipo)):
+                self.servidor.tablero[p] = None
+                self.servidor.ship_cells.discard(p)
+            self.servidor.ships[tipo].clear()
+
+        ok = self.servidor.colocar_barco(tipo, positions)
         if ok:
-            # Visualmente marcar D
-            for p in self.buttons:
-                self.buttons[p].config(text='~')
-            self.buttons[pos].config(text='D')
-            self.status_var.set(f'Destroyer colocado en {pos}')
+            self.refresh_board()
+            self.status_var.set(f'{ship_choice} colocado en {positions}')
         else:
-            messagebox.showerror('Error', f'No se pudo colocar Destroyer en {pos}.')
+            messagebox.showerror('Error', 'No se pudo colocar el barco')
+
+    def clear_fleet(self):
+        """Limpia la flota en el servidor y refresca la GUI."""
+        if messagebox.askyesno('Limpiar', '¿Desea quitar todos los barcos del tablero?'):
+            self.servidor.limpiar_flota()
+            self.refresh_board()
+            self.status_var.set('Flota limpiada')
+
+    def refresh_board(self):
+        """Actualizar visualmente los botones según el tablero y los impactos del servidor."""
+        for pos, btn in self.buttons.items():
+            # Priorizar impactos
+            if self.servidor.impactos.get(pos) == 'X':
+                btn.config(text='X')
+            elif self.servidor.impactos.get(pos) == 'O':
+                btn.config(text='O')
+            else:
+                v = self.servidor.tablero.get(pos)
+                if v == 'D':
+                    btn.config(text='D')
+                elif v == 'S':
+                    btn.config(text='SS')
+                elif v == 'L':
+                    btn.config(text='LLL')
+                else:
+                    btn.config(text='~')
 
     def start_server(self):
         # Validar IP y puerto

@@ -32,9 +32,9 @@ class NavalServerFSM:
         # Tamaño del tablero (2x2, 5x5)
         self.filas = 5
         self.columnas = 5
-        
+
         # Tablero de juego (representado como diccionario para facilitar acceso)
-        # Valores posibles: None (agua), 'D' (Destroyer)
+        # Valores posibles en tablero (tipo interno): None (agua), 'D' (Destroyer), 'S' (Submarino), 'L' (Acorazado)
         self.tablero = {
             'A1': None, 'A2': None, 'A3': None, 'A4': None, 'A5': None,
             'B1': None, 'B2': None, 'B3': None, 'B4': None, 'B5': None,
@@ -42,7 +42,7 @@ class NavalServerFSM:
             'D1': None, 'D2': None, 'D3': None, 'D4': None, 'D5': None,
             'E1': None, 'E2': None, 'E3': None, 'E4': None, 'E5': None
         }
-        
+
         # Estado de impactos (para seguimiento visual)
         # Valores: '~' (sin atacar), 'O' (fallo/agua), 'X' (impacto)
         self.impactos = {
@@ -52,14 +52,27 @@ class NavalServerFSM:
             'D1': '~', 'D2': '~', 'D3': '~', 'D4': '~', 'D5': '~',
             'E1': '~', 'E2': '~', 'E3': '~', 'E4': '~', 'E5': '~'
         }
-        
+
         # Historial de ataques (para evitar ataques repetidos)
         self.ataques_recibidos = set()
-        
+
+        # Estructura para manejar barcos multi-celda
+        # ships -> mapa tipo -> conjunto de posiciones (ej: 'S': {'B1','B2'})
+        self.ships = {
+            'D': set(),  # Destroyer (1 celda)
+            'S': set(),  # Submarino (2 celdas)
+            'L': set()   # Acorazado (3 celdas)
+        }
+
+        # Conjunto de todas las celdas ocupadas por cualquier barco
+        self.ship_cells = set()
+
         # Socket del servidor
         self.server_socket = None
         self.host = '192.168.10.187' ##'localhost'  # Para propósitos educativos, usar localhost
         self.port = 5000         # Puerto por defecto
+
+    # Nota: no colocar flota por defecto aquí. La GUI podrá colocar barcos manualmente.
     
     def colocar_flota(self, posicion_destroyer):
         """
@@ -72,13 +85,93 @@ class NavalServerFSM:
         if posicion_destroyer not in self.tablero:
             print(f"Posición {posicion_destroyer} inválida.")
             return False
-        
-        # Colocar el Destroyer
+
+        # Colocar el Destroyer (1 celda)
         self.tablero[posicion_destroyer] = 'D'
-        
+        self.ships['D'].add(posicion_destroyer)
+        self.ship_cells.add(posicion_destroyer)
+
         # Cambiar estado a FLOTA_INTACTA
         self.estado_actual = self.FLOTA_INTACTA
         print(f"Destroyer colocado en {posicion_destroyer}")
+        return True
+
+    def _colocar_barcos_defecto(self):
+        """
+        Coloca por defecto un Submarino (2 celdas) y un Acorazado (3 celdas).
+        Las posiciones elegidas son didácticas y fijas: Submarino en B1-B2, Acorazado en C1-C3.
+        """
+        # Submarino (2 casillas)
+        subs = ['B1', 'B2']
+        for p in subs:
+            if p in self.tablero:
+                self.tablero[p] = 'S'
+                self.ships['S'].add(p)
+                self.ship_cells.add(p)
+
+        # Acorazado (3 casillas)
+        acor = ['C1', 'C2', 'C3']
+        for p in acor:
+            if p in self.tablero:
+                self.tablero[p] = 'L'
+                self.ships['L'].add(p)
+                self.ship_cells.add(p)
+
+        if self.ship_cells:
+            self.estado_actual = self.FLOTA_INTACTA
+            print(f"Flota por defecto colocada: Submarino {subs}, Acorazado {acor}")
+
+    def limpiar_flota(self):
+        """Quita todos los barcos del tablero y resetea impactos/estado."""
+        # Limpiar celdas ocupadas
+        for pos in list(self.ship_cells):
+            if pos in self.tablero:
+                self.tablero[pos] = None
+        # Reset estructuras
+        for k in self.ships:
+            self.ships[k].clear()
+        self.ship_cells.clear()
+
+        # Reset impactos
+        for k in self.impactos:
+            self.impactos[k] = '~'
+
+        self.estado_actual = self.INICIO
+
+    def colocar_barco(self, tipo, posiciones):
+        """Coloca un barco de tipo dado en las posiciones listadas.
+
+        Args:
+            tipo: 'D', 'S' o 'L'
+            posiciones: lista/iterable de posiciones (ej: ['B1','B2'])
+
+        Returns:
+            True si se colocó correctamente, False si hay conflicto o posición inválida.
+        """
+        # Validar tipo
+        if tipo not in ('D', 'S', 'L'):
+            print(f"Tipo de barco inválido: {tipo}")
+            return False
+
+        # Validar posiciones
+        pos_list = list(posiciones)
+        for p in pos_list:
+            if p not in self.tablero:
+                print(f"Posición inválida: {p}")
+                return False
+            if self.tablero[p] is not None:
+                print(f"Posición ocupada: {p}")
+                return False
+
+        # Colocar
+        for p in pos_list:
+            self.tablero[p] = tipo
+            self.ships[tipo].add(p)
+            self.ship_cells.add(p)
+
+        # Actualizar estado
+        if self.ship_cells:
+            self.estado_actual = self.FLOTA_INTACTA
         return True
     
     def mostrar_tablero(self):
@@ -86,25 +179,37 @@ class NavalServerFSM:
         Muestra el tablero actual del juego.
         """
         print("\nTablero de defensa (5x5):")
-        print("  1 2 3 4 5")
-        print(" ┌─────────┐")
-        
+        # Usaremos ancho de columna fijo para mostrar etiquetas más largas (ej: 'SS','LLL')
+        cols = ['1', '2', '3', '4', '5']
+        print("  ", end="")
+        for c in cols:
+            print(f" {c} ", end="")
+        print()
+        print(" ┌────────────────────────────┐")
+
         for fila in ['A', 'B', 'C', 'D', 'E']:
             print(f"{fila}│", end="")
-            for col in ['1', '2', '3', '4', '5']:
+            for col in cols:
                 pos = f"{fila}{col}"
                 if self.impactos[pos] == 'X':
-                    print("X ", end="")  # Impacto
+                    cel = ' X '
                 elif self.impactos[pos] == 'O':
-                    print("O ", end="")  # Agua
-                elif self.tablero[pos] == 'D':
-                    print("D ", end="")  # Destroyer (visible solo para el servidor)
+                    cel = ' O '
                 else:
-                    print("~ ", end="")  # Agua sin atacar
+                    # Mostrar tipo de barco si existe
+                    if self.tablero[pos] == 'D':
+                        cel = ' D '
+                    elif self.tablero[pos] == 'S':
+                        cel = 'SS '
+                    elif self.tablero[pos] == 'L':
+                        cel = 'LLL'
+                    else:
+                        cel = ' ~ '
+                print(cel, end="")
             print("│")
-        
-        print(" └───┘")
-        print(" D: Destroyer, ~: Agua, O: Fallo, X: Impacto")
+
+        print(" └────────────────────────────┘")
+        print(" D: Destroyer, SS: Submarino (2), LLL: Acorazado (3), ~: Agua, O: Fallo, X: Impacto")
         
     def procesar_ataque(self, coordenada):
         """
@@ -130,17 +235,30 @@ class NavalServerFSM:
         # Función de transición δ según el estado actual y la entrada
         if self.estado_actual == self.INICIO:
             return "400", "Flota_No_Colocada"
-            
+
         elif self.estado_actual == self.FLOTA_INTACTA:
-            # Verificar si impactó el Destroyer
-            if self.tablero[coordenada] == 'D':
-                self.impactos[coordenada] = 'X'  # Marcar impacto
-                self.estado_actual = self.HUNDIDO  # Transición al estado HUNDIDO
-                return "200", "Hundido"
+            # Verificar si impactó alguna parte de la flota
+            if coordenada in self.ship_cells:
+                # Marcar impacto
+                self.impactos[coordenada] = 'X'
+                # Remover la celda ocupada
+                self.ship_cells.discard(coordenada)
+                # También quitar de la estructura de ships
+                for t, sset in self.ships.items():
+                    if coordenada in sset:
+                        sset.discard(coordenada)
+                        break
+
+                # Si ya no quedan casillas con barcos, toda la flota está hundida
+                if not self.ship_cells:
+                    self.estado_actual = self.HUNDIDO
+                    return "200", "Hundido"
+                else:
+                    return "200", "Impacto"
             else:
                 self.impactos[coordenada] = 'O'  # Marcar fallo (agua)
                 return "404", "Fallido"
-                
+
         elif self.estado_actual == self.HUNDIDO:
             # Ya no hay barcos para hundir
             self.impactos[coordenada] = 'O'  # Marcar como agua
