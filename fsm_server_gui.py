@@ -103,10 +103,12 @@ class ServerGUI:
         # Info / legend
         legend = tk.Frame(root)
         legend.pack(padx=10, pady=(0,8), anchor='w')
-        tk.Label(legend, text='Leyenda: D = Destroyer, SS = Submarino (2), LLL = Acorazado (3), ~ = agua, X = impacto, O = fallo').pack(side='left')
+        tk.Label(legend, text='Leyenda: D = Destroyer, SS = Submarino (2), LLL = Acorazado (3), ~ = agua, X = impacto, 0 = fallo (agua)').pack(side='left')
         tk.Button(legend, text='Refrescar flota', command=self.refresh_board).pack(side='left', padx=(8,0))
 
         # Bind close
+        # Iniciar polling para refrescar tablero automáticamente (muestra impactos recibidos por el servidor)
+        self.root.after(500, self._poll_server)
         self.root.protocol('WM_DELETE_WINDOW', self.on_close)
 
     def toggle_cell(self, pos):
@@ -213,7 +215,7 @@ class ServerGUI:
             if self.servidor.impactos.get(pos) == 'X':
                 btn.config(text='X')
             elif self.servidor.impactos.get(pos) == 'O':
-                btn.config(text='O')
+                btn.config(text='0')
             else:
                 v = self.servidor.tablero.get(pos)
                 if v == 'D':
@@ -224,6 +226,14 @@ class ServerGUI:
                     btn.config(text='LLL')
                 else:
                     btn.config(text='~')
+
+    def _poll_server(self):
+        """Polling periódico: refresca la vista del tablero para mostrar impactos que llegan desde el hilo del servidor."""
+        try:
+            self.refresh_board()
+        finally:
+            # Reprogramar
+            self.root.after(500, self._poll_server)
 
     def start_server(self):
         # Validar IP y puerto

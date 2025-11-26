@@ -69,7 +69,7 @@ class NavalServerFSM:
 
         # Socket del servidor
         self.server_socket = None
-        self.host = '192.168.10.187' ##'localhost'  # Para propósitos educativos, usar localhost
+        self.host = '' ##'localhost'  # Para propósitos educativos, usar localhost
         self.port = 5000         # Puerto por defecto
 
     # Nota: no colocar flota por defecto aquí. La GUI podrá colocar barcos manualmente.
